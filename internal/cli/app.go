@@ -281,7 +281,7 @@ func (a *App) runSync(ctx context.Context, configPath string, args []string, for
 	fs.SetOutput(a.Stderr)
 	source := fs.String("source", "api", "api|desktop|all")
 	workspaceID := fs.String("workspace", "", "workspace id")
-	channels := fs.String("channels", "", "comma separated channel ids")
+	channels := fs.String("channels", "", "comma separated channel ids or names to include")
 	excludeChannels := fs.String("exclude-channels", "", "comma separated channel ids or names to exclude")
 	since := fs.String("since", "", "oldest slack ts or RFC3339 timestamp")
 	full := fs.Bool("full", false, "full sync")

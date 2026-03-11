@@ -179,7 +179,9 @@ func (c *Client) Sync(ctx context.Context, st *store.Store, opts SyncOptions) er
 	selectedChannels := make([]slack.Channel, 0, len(channels))
 	for _, channel := range channels {
 		if len(allow) > 0 {
-			if _, ok := allow[channel.ID]; !ok {
+			_, byID := allow[channel.ID]
+			_, byName := allow[channel.Name]
+			if !byID && !byName {
 				continue
 			}
 		}
