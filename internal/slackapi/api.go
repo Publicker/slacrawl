@@ -37,15 +37,16 @@ type Diagnostics struct {
 }
 
 type SyncOptions struct {
-	WorkspaceID string
-	Channels    []string
-	Since       string
-	Full        bool
-	Concurrency int
-	Weeks       int
-	From        string
-	ChunkDelay  time.Duration
-	OnChunkDone func(week int, oldest, latest string)
+	WorkspaceID     string
+	Channels        []string
+	ExcludeChannels []string
+	Since           string
+	Full            bool
+	Concurrency     int
+	Weeks           int
+	From            string
+	ChunkDelay      time.Duration
+	OnChunkDone     func(week int, oldest, latest string)
 }
 
 type Client struct {
@@ -171,12 +172,23 @@ func (c *Client) Sync(ctx context.Context, st *store.Store, opts SyncOptions) er
 	for _, id := range opts.Channels {
 		allow[id] = struct{}{}
 	}
+	exclude := make(map[string]struct{}, len(opts.ExcludeChannels))
+	for _, v := range opts.ExcludeChannels {
+		exclude[v] = struct{}{}
+	}
 	selectedChannels := make([]slack.Channel, 0, len(channels))
 	for _, channel := range channels {
 		if len(allow) > 0 {
 			if _, ok := allow[channel.ID]; !ok {
 				continue
 			}
+		}
+		// Exclude by channel ID or name.
+		if _, ok := exclude[channel.ID]; ok {
+			continue
+		}
+		if _, ok := exclude[channel.Name]; ok {
+			continue
 		}
 		selectedChannels = append(selectedChannels, channel)
 	}
@@ -337,7 +349,7 @@ func (c *Client) fetchChannels(ctx context.Context, workspaceID string) ([]slack
 			Cursor:          cursor,
 			ExcludeArchived: false,
 			Limit:           200,
-			Types:           []string{"public_channel", "private_channel"},
+			Types:           []string{"public_channel", "private_channel", "im", "mpim"},
 			TeamID:          workspaceID,
 		})
 		if err != nil {
@@ -543,12 +555,17 @@ func (c *Client) authTest(ctx context.Context, client *slack.Client) (*slack.Aut
 }
 
 func (c *Client) getConversations(ctx context.Context, params *slack.GetConversationsParameters) ([]slack.Channel, string, error) {
+	// Prefer user token for listing conversations to include DMs and MPIMs.
+	client := c.bot
+	if c.user != nil {
+		client = c.user
+	}
 	type result struct {
 		channels   []slack.Channel
 		nextCursor string
 	}
 	res, err := retry(ctx, c.sleep, 3, func() (result, error) {
-		channels, nextCursor, err := c.bot.GetConversationsContext(ctx, params)
+		channels, nextCursor, err := client.GetConversationsContext(ctx, params)
 		return result{channels: channels, nextCursor: nextCursor}, err
 	})
 	return res.channels, res.nextCursor, err
@@ -592,17 +609,28 @@ func (c *Client) joinConversation(ctx context.Context, channelID string) error {
 
 func toStoreChannel(workspaceID string, channel slack.Channel, now time.Time) store.Channel {
 	kind := "public_channel"
-	if channel.IsPrivate {
+	name := channel.Name
+	if channel.IsIM {
+		kind = "im"
+		if name == "" {
+			name = "dm-" + channel.User
+		}
+	} else if channel.IsMpIM {
+		kind = "mpim"
+		if name == "" {
+			name = channel.ID
+		}
+	} else if channel.IsPrivate {
 		kind = "private_channel"
 	}
 	return store.Channel{
 		ID:          channel.ID,
 		WorkspaceID: workspaceID,
-		Name:        channel.Name,
+		Name:        name,
 		Kind:        kind,
 		Topic:       channel.Topic.Value,
 		Purpose:     channel.Purpose.Value,
-		IsPrivate:   channel.IsPrivate,
+		IsPrivate:   channel.IsPrivate || channel.IsIM || channel.IsMpIM,
 		IsArchived:  channel.IsArchived,
 		IsShared:    channel.IsShared,
 		IsGeneral:   channel.IsGeneral,

@@ -20,16 +20,17 @@ const (
 )
 
 type Options struct {
-	Source      Source
-	WorkspaceID string
-	Channels    []string
-	Since       string
-	Full        bool
-	Concurrency int
-	Weeks       int
-	From        string
-	ChunkDelay  time.Duration
-	OnChunkDone func(week int, oldest, latest string)
+	Source          Source
+	WorkspaceID     string
+	Channels        []string
+	ExcludeChannels []string
+	Since           string
+	Full            bool
+	Concurrency     int
+	Weeks           int
+	From            string
+	ChunkDelay      time.Duration
+	OnChunkDone     func(week int, oldest, latest string)
 }
 
 type Summary struct {
@@ -46,29 +47,31 @@ func RunWithTokens(ctx context.Context, cfg config.Config, st *store.Store, opts
 	switch opts.Source {
 	case SourceAPI:
 		return summary, slackapi.New(tokens).Sync(ctx, st, slackapi.SyncOptions{
-			WorkspaceID: opts.WorkspaceID,
-			Channels:    opts.Channels,
-			Since:       opts.Since,
-			Full:        opts.Full,
-			Concurrency: opts.Concurrency,
-			Weeks:       opts.Weeks,
-			From:        opts.From,
-			ChunkDelay:  opts.ChunkDelay,
-			OnChunkDone: opts.OnChunkDone,
+			WorkspaceID:     opts.WorkspaceID,
+			Channels:        opts.Channels,
+			ExcludeChannels: opts.ExcludeChannels,
+			Since:           opts.Since,
+			Full:            opts.Full,
+			Concurrency:     opts.Concurrency,
+			Weeks:           opts.Weeks,
+			From:            opts.From,
+			ChunkDelay:      opts.ChunkDelay,
+			OnChunkDone:     opts.OnChunkDone,
 		})
 	case SourceDesktop:
 		return syncDesktop(ctx, cfg, st)
 	case SourceAll:
 		if err := slackapi.New(tokens).Sync(ctx, st, slackapi.SyncOptions{
-			WorkspaceID: opts.WorkspaceID,
-			Channels:    opts.Channels,
-			Since:       opts.Since,
-			Full:        opts.Full,
-			Concurrency: opts.Concurrency,
-			Weeks:       opts.Weeks,
-			From:        opts.From,
-			ChunkDelay:  opts.ChunkDelay,
-			OnChunkDone: opts.OnChunkDone,
+			WorkspaceID:     opts.WorkspaceID,
+			Channels:        opts.Channels,
+			ExcludeChannels: opts.ExcludeChannels,
+			Since:           opts.Since,
+			Full:            opts.Full,
+			Concurrency:     opts.Concurrency,
+			Weeks:           opts.Weeks,
+			From:            opts.From,
+			ChunkDelay:      opts.ChunkDelay,
+			OnChunkDone:     opts.OnChunkDone,
 		}); err != nil {
 			return summary, err
 		}

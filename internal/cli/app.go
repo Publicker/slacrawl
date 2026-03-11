@@ -282,6 +282,7 @@ func (a *App) runSync(ctx context.Context, configPath string, args []string, for
 	source := fs.String("source", "api", "api|desktop|all")
 	workspaceID := fs.String("workspace", "", "workspace id")
 	channels := fs.String("channels", "", "comma separated channel ids")
+	excludeChannels := fs.String("exclude-channels", "", "comma separated channel ids or names to exclude")
 	since := fs.String("since", "", "oldest slack ts or RFC3339 timestamp")
 	full := fs.Bool("full", false, "full sync")
 	concurrency := fs.Int("concurrency", cfg.Sync.Concurrency, "worker count")
@@ -308,16 +309,17 @@ func (a *App) runSync(ctx context.Context, configPath string, args []string, for
 	}
 
 	runOptions := syncer.Options{
-		Source:      syncer.Source(*source),
-		WorkspaceID: coalesce(*workspaceID, cfg.WorkspaceID),
-		Channels:    csv(*channels),
-		Since:       *since,
-		Full:        *full,
-		Concurrency: *concurrency,
-		Weeks:       *weeks,
-		From:        *from,
-		ChunkDelay:  chunkDelayDuration,
-		OnChunkDone: onChunkDone,
+		Source:          syncer.Source(*source),
+		WorkspaceID:     coalesce(*workspaceID, cfg.WorkspaceID),
+		Channels:        csv(*channels),
+		ExcludeChannels: csv(*excludeChannels),
+		Since:           *since,
+		Full:            *full,
+		Concurrency:     *concurrency,
+		Weeks:           *weeks,
+		From:            *from,
+		ChunkDelay:      chunkDelayDuration,
+		OnChunkDone:     onChunkDone,
 	}
 	summary, err := a.runSyncTargets(ctx, cfg, st, runOptions)
 	if err != nil {
