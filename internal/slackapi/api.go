@@ -42,6 +42,10 @@ type SyncOptions struct {
 	Since       string
 	Full        bool
 	Concurrency int
+	Weeks       int
+	From        string
+	ChunkDelay  time.Duration
+	OnChunkDone func(week int, oldest, latest string)
 }
 
 type Client struct {
@@ -148,6 +152,17 @@ func (c *Client) Sync(ctx context.Context, st *store.Store, opts SyncOptions) er
 	}
 	userRepliesAvailable := c.userAuthAvailable(ctx)
 
+	// Sync users early so they persist even if message sync is interrupted.
+	users, err := c.getUsers(ctx, c.bot)
+	if err != nil {
+		return err
+	}
+	for _, user := range users {
+		if err := st.UpsertUser(ctx, toStoreUser(workspaceID, user, now)); err != nil {
+			return err
+		}
+	}
+
 	channels, err := c.fetchChannels(ctx, workspaceID)
 	if err != nil {
 		return err
@@ -165,16 +180,14 @@ func (c *Client) Sync(ctx context.Context, st *store.Store, opts SyncOptions) er
 		}
 		selectedChannels = append(selectedChannels, channel)
 	}
-	if err := c.syncChannels(ctx, st, workspaceID, selectedChannels, opts, now, userRepliesAvailable); err != nil {
-		return err
-	}
 
-	users, err := c.getUsers(ctx, c.bot)
-	if err != nil {
-		return err
-	}
-	for _, user := range users {
-		if err := st.UpsertUser(ctx, toStoreUser(workspaceID, user, now)); err != nil {
+	// Weekly chunked sync: newest first, one week at a time.
+	if opts.Weeks > 0 {
+		if err := c.syncChunked(ctx, st, workspaceID, selectedChannels, opts, now, userRepliesAvailable); err != nil {
+			return err
+		}
+	} else {
+		if err := c.syncChannels(ctx, st, workspaceID, selectedChannels, opts, now, userRepliesAvailable); err != nil {
 			return err
 		}
 	}
@@ -187,6 +200,65 @@ func (c *Client) Sync(ctx context.Context, st *store.Store, opts SyncOptions) er
 		return err
 	}
 	return st.SetSyncState(ctx, SourceBot, "workspace", workspaceID, now.Format(time.RFC3339))
+}
+
+func (c *Client) syncChunked(ctx context.Context, st *store.Store, workspaceID string, channels []slack.Channel, opts SyncOptions, now time.Time, userRepliesAvailable bool) error {
+	chunkDelay := opts.ChunkDelay
+	if chunkDelay <= 0 {
+		chunkDelay = 5 * time.Second
+	}
+
+	// Determine the starting point (latest edge of the first chunk).
+	latest := now
+	if opts.From != "" {
+		parsed, err := strconv.ParseFloat(opts.From, 64)
+		if err != nil {
+			return fmt.Errorf("invalid --from timestamp %q: %w", opts.From, err)
+		}
+		latest = time.Unix(int64(parsed), 0).UTC()
+	}
+
+	for week := 0; week < opts.Weeks; week++ {
+		weekLatest := latest.Add(-time.Duration(week) * 7 * 24 * time.Hour)
+		weekOldest := weekLatest.Add(-7 * 24 * time.Hour)
+
+		oldestTS := strconv.FormatFloat(float64(weekOldest.Unix()), 'f', 6, 64)
+		latestTS := strconv.FormatFloat(float64(weekLatest.Unix()), 'f', 6, 64)
+
+		chunkOpts := opts
+		chunkOpts.Since = oldestTS
+		chunkOpts.Full = true
+		chunkOpts.Weeks = 0
+
+		for _, channel := range channels {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := st.UpsertChannel(ctx, toStoreChannel(workspaceID, channel, now)); err != nil {
+				return err
+			}
+			if err := c.syncChannelMessagesWindow(ctx, st, workspaceID, channel, oldestTS, latestTS, now, userRepliesAvailable); err != nil {
+				return err
+			}
+		}
+
+		// Store the deepest synced timestamp for resume.
+		if err := st.SetSyncState(ctx, "chunked", "deepest_ts", workspaceID, oldestTS); err != nil {
+			return err
+		}
+
+		if opts.OnChunkDone != nil {
+			opts.OnChunkDone(week+1, oldestTS, latestTS)
+		}
+
+		// Delay between chunks to avoid rate limits.
+		if week < opts.Weeks-1 {
+			if err := c.sleep(ctx, chunkDelay); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (c *Client) Tail(ctx context.Context, st *store.Store, workspaceID string, repairEvery time.Duration) error {
@@ -280,36 +352,61 @@ func (c *Client) fetchChannels(ctx context.Context, workspaceID string) ([]slack
 }
 
 func (c *Client) syncChannelMessages(ctx context.Context, st *store.Store, workspaceID string, channel slack.Channel, oldest string, now time.Time, userRepliesAvailable bool) error {
+	return c.syncChannelMessagesWindow(ctx, st, workspaceID, channel, oldest, "", now, userRepliesAvailable)
+}
+
+// syncChannelMessagesWindow fetches messages between oldest and latest (both Slack ts strings).
+// If latest is empty, it fetches up to the present.
+func (c *Client) syncChannelMessagesWindow(ctx context.Context, st *store.Store, workspaceID string, channel slack.Channel, oldest string, latest string, now time.Time, userRepliesAvailable bool) error {
+	// Prefer user token for history to avoid needing bot channel membership.
+	historyClient := c.bot
+	sourceName := SourceBot
+	if c.user != nil {
+		historyClient = c.user
+		sourceName = SourceUser
+	}
+
 	cursor := ""
-	joined := false
 	for {
-		resp, err := c.getConversationHistory(ctx, c.bot, &slack.GetConversationHistoryParameters{
+		params := &slack.GetConversationHistoryParameters{
 			ChannelID: channel.ID,
 			Cursor:    cursor,
 			Limit:     200,
 			Oldest:    oldest,
-		})
+		}
+		if latest != "" {
+			params.Latest = latest
+		}
+		resp, err := c.getConversationHistory(ctx, historyClient, params)
 		if err != nil {
-			if !joined && channelSkipReason(err) == "not_in_channel" && !channel.IsPrivate {
-				joinErr := c.joinConversation(ctx, channel.ID)
-				if joinErr == nil {
-					joined = true
-					if setErr := st.SetSyncState(ctx, SourceBot, "channel_join", channel.ID, "joined"); setErr != nil {
-						return setErr
-					}
-					continue
+			// If user token also fails, fall back to bot token once.
+			if sourceName == SourceUser && channelSkipReason(err) == "not_in_channel" {
+				params2 := &slack.GetConversationHistoryParameters{
+					ChannelID: channel.ID,
+					Cursor:    cursor,
+					Limit:     200,
+					Oldest:    oldest,
 				}
-				if setErr := st.SetSyncState(ctx, SourceBot, "channel_join", channel.ID, "failed:"+authErrorReason(joinErr)); setErr != nil {
-					return setErr
+				if latest != "" {
+					params2.Latest = latest
+				}
+				resp, err = c.getConversationHistory(ctx, c.bot, params2)
+				if err == nil {
+					sourceName = SourceBot
 				}
 			}
-			if isChannelHistorySkipped(err) {
-				return st.SetSyncState(ctx, SourceBot, "channel_skip", channel.ID, channelSkipReason(err))
+			if err != nil {
+				if isChannelHistorySkipped(err) {
+					return st.SetSyncState(ctx, sourceName, "channel_skip", channel.ID, channelSkipReason(err))
+				}
+				return fmt.Errorf("channel %s history: %w", channel.ID, err)
 			}
-			return fmt.Errorf("channel %s history: %w", channel.ID, err)
 		}
 		for _, msg := range resp.Messages {
-			if err := st.UpsertMessage(ctx, toStoreMessage(workspaceID, msg, SourceBot, 2, now), toStoreMentions(msg)); err != nil {
+			if msg.Channel == "" {
+				msg.Channel = channel.ID
+			}
+			if err := st.UpsertMessage(ctx, toStoreMessage(workspaceID, msg, sourceName, 2, now), toStoreMentions(msg)); err != nil {
 				return err
 			}
 			if msg.ReplyCount > 0 && userRepliesAvailable {
@@ -338,6 +435,9 @@ func (c *Client) syncThread(ctx context.Context, st *store.Store, workspaceID st
 			return err
 		}
 		for _, msg := range msgs {
+			if msg.Channel == "" {
+				msg.Channel = channelID
+			}
 			if err := st.UpsertMessage(ctx, toStoreMessage(workspaceID, msg, SourceUser, 1, now), toStoreMentions(msg)); err != nil {
 				return err
 			}

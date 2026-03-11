@@ -285,8 +285,16 @@ func (a *App) runSync(ctx context.Context, configPath string, args []string, for
 	since := fs.String("since", "", "oldest slack ts or RFC3339 timestamp")
 	full := fs.Bool("full", false, "full sync")
 	concurrency := fs.Int("concurrency", cfg.Sync.Concurrency, "worker count")
+	weeks := fs.Int("weeks", 0, "sync in weekly chunks (newest first), e.g. 13 for ~3 months")
+	from := fs.String("from", "", "resume chunked sync from this slack ts (deepest point)")
+	chunkDelay := fs.String("chunk-delay", "5s", "delay between weekly chunks to avoid rate limits")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+
+	chunkDelayDuration, err := time.ParseDuration(*chunkDelay)
+	if err != nil {
+		return fmt.Errorf("invalid --chunk-delay: %w", err)
 	}
 
 	st, err := store.Open(cfg.DBPath)
@@ -295,6 +303,10 @@ func (a *App) runSync(ctx context.Context, configPath string, args []string, for
 	}
 	defer st.Close()
 
+	onChunkDone := func(week int, oldest, latest string) {
+		fmt.Fprintf(a.Stderr, "  chunk %d done  oldest=%s  latest=%s\n", week, oldest, latest)
+	}
+
 	runOptions := syncer.Options{
 		Source:      syncer.Source(*source),
 		WorkspaceID: coalesce(*workspaceID, cfg.WorkspaceID),
@@ -302,6 +314,10 @@ func (a *App) runSync(ctx context.Context, configPath string, args []string, for
 		Since:       *since,
 		Full:        *full,
 		Concurrency: *concurrency,
+		Weeks:       *weeks,
+		From:        *from,
+		ChunkDelay:  chunkDelayDuration,
+		OnChunkDone: onChunkDone,
 	}
 	summary, err := a.runSyncTargets(ctx, cfg, st, runOptions)
 	if err != nil {

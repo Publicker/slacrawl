@@ -164,7 +164,7 @@ func TestSyncUsesConfiguredConcurrencyForChannelHistory(t *testing.T) {
 	require.Len(t, rows, 2)
 }
 
-func TestSyncJoinsPublicChannelBeforeRetryingHistory(t *testing.T) {
+func TestSyncSkipsChannelWhenBotNotInChannel(t *testing.T) {
 	server := newJoinRetrySlackServer(t)
 	defer server.Close()
 
@@ -181,12 +181,11 @@ func TestSyncJoinsPublicChannelBeforeRetryingHistory(t *testing.T) {
 
 	rows, err := st.Messages(context.Background(), "", "C111", "", 10)
 	require.NoError(t, err)
-	require.Len(t, rows, 1)
-	require.Equal(t, "joined message", rows[0].Text)
+	require.Len(t, rows, 0)
 
-	joinState, err := st.GetSyncState(context.Background(), SourceBot, "channel_join", "C111")
+	skipState, err := st.GetSyncState(context.Background(), SourceBot, "channel_skip", "C111")
 	require.NoError(t, err)
-	require.Equal(t, "joined", joinState)
+	require.Equal(t, "not_in_channel", skipState)
 }
 
 func TestSyncDefaultsToIncrementalHistoryWhenNotFull(t *testing.T) {

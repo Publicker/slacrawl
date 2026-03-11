@@ -3,6 +3,7 @@ package syncer
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/vincentkoc/slacrawl/internal/config"
 	"github.com/vincentkoc/slacrawl/internal/slackapi"
@@ -25,6 +26,10 @@ type Options struct {
 	Since       string
 	Full        bool
 	Concurrency int
+	Weeks       int
+	From        string
+	ChunkDelay  time.Duration
+	OnChunkDone func(week int, oldest, latest string)
 }
 
 type Summary struct {
@@ -46,6 +51,10 @@ func RunWithTokens(ctx context.Context, cfg config.Config, st *store.Store, opts
 			Since:       opts.Since,
 			Full:        opts.Full,
 			Concurrency: opts.Concurrency,
+			Weeks:       opts.Weeks,
+			From:        opts.From,
+			ChunkDelay:  opts.ChunkDelay,
+			OnChunkDone: opts.OnChunkDone,
 		})
 	case SourceDesktop:
 		return syncDesktop(ctx, cfg, st)
@@ -56,6 +65,10 @@ func RunWithTokens(ctx context.Context, cfg config.Config, st *store.Store, opts
 			Since:       opts.Since,
 			Full:        opts.Full,
 			Concurrency: opts.Concurrency,
+			Weeks:       opts.Weeks,
+			From:        opts.From,
+			ChunkDelay:  opts.ChunkDelay,
+			OnChunkDone: opts.OnChunkDone,
 		}); err != nil {
 			return summary, err
 		}
